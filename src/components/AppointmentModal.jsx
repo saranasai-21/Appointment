@@ -1,281 +1,117 @@
 import React, { useState, useEffect } from 'react';
-import { XIcon, AlertIcon } from './Icons';
 
-const CATEGORIES = [
-  'Team Sync',
-  'Client Meeting',
-  'Code Review',
-  '1-on-1',
-  'Sprint Planning',
-  'Design Review',
-  'Tech Architecture',
-  'General'
-];
+const CATEGORIES = ['General', 'Team Sync', 'Client Meeting', 'Code Review', '1-on-1', 'Sprint Planning', 'Design Review'];
 
 export default function AppointmentModal({ isOpen, onClose, onSave, editingAppointment }) {
-  const [formData, setFormData] = useState({
-    title: '',
-    description: '',
-    attendee: '',
-    category: 'Team Sync',
-    date: new Date().toISOString().split('T')[0],
-    start_time: '10:00',
-    end_time: '11:00',
+  const [form, setForm] = useState({
+    title: '', description: '', attendee: '', category: 'General',
+    date: '', start_time: '10:00', end_time: '11:00',
   });
-
-  const [clientError, setClientError] = useState('');
-  const [serverError, setServerError] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (editingAppointment) {
-      setFormData({
+      setForm({
         title: editingAppointment.title || '',
         description: editingAppointment.description || '',
         attendee: editingAppointment.attendee || '',
-        category: editingAppointment.category || 'Team Sync',
-        date: editingAppointment.date || new Date().toISOString().split('T')[0],
+        category: editingAppointment.category || 'General',
+        date: editingAppointment.date || '',
         start_time: editingAppointment.start_time || '10:00',
         end_time: editingAppointment.end_time || '11:00',
       });
     } else {
-      // Default new appointment state
-      setFormData({
-        title: '',
-        description: '',
-        attendee: '',
-        category: 'Team Sync',
+      setForm({
+        title: '', description: '', attendee: '', category: 'General',
         date: new Date().toISOString().split('T')[0],
-        start_time: '10:00',
-        end_time: '11:00',
+        start_time: '10:00', end_time: '11:00',
       });
     }
-    setClientError('');
-    setServerError('');
+    setError('');
   }, [editingAppointment, isOpen]);
 
   if (!isOpen) return null;
 
   const handleChange = (e) => {
-    const { name, value } = e.target;
-    const updated = { ...formData, [name]: value };
-    setFormData(updated);
-
-    // Dynamic instant validation
-    if (updated.start_time && updated.end_time) {
-      if (updated.end_time <= updated.start_time) {
-        setClientError(`End time (${updated.end_time}) must be strictly after start time (${updated.start_time}).`);
-      } else {
-        setClientError('');
-      }
-    }
-    // Clear previous server error once user adjusts
-    setServerError('');
+    setForm({ ...form, [e.target.name]: e.target.value });
+    setError(''); // clear error when user types
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setClientError('');
-    setServerError('');
 
-    // Pre-flight checks
-    if (!formData.title.trim()) {
-      setClientError('Title is required.');
-      return;
-    }
-    if (!formData.attendee.trim()) {
-      setClientError('Attendee name is required.');
-      return;
-    }
-    if (!formData.date) {
-      setClientError('Date is required.');
-      return;
-    }
-    if (!formData.start_time || !formData.end_time) {
-      setClientError('Start time and end time are required.');
-      return;
-    }
-    if (formData.end_time <= formData.start_time) {
-      setClientError(`End time (${formData.end_time}) must be strictly after start time (${formData.start_time}).`);
-      return;
-    }
+    // basic checks
+    if (!form.title.trim()) return setError('Title is required');
+    if (!form.attendee.trim()) return setError('Attendee is required');
+    if (!form.date) return setError('Date is required');
+    if (form.end_time <= form.start_time) return setError('End time must be after start time');
 
-    setIsSubmitting(true);
+    setSaving(true);
     try {
-      await onSave(formData, editingAppointment ? editingAppointment.id : null);
+      await onSave(form, editingAppointment?.id);
       onClose();
     } catch (err) {
-      // Handle 409 conflict or validation error from backend
-      setServerError(err.message || 'Failed to save appointment. Please check your inputs.');
+      setError(err.message);
     } finally {
-      setIsSubmitting(false);
+      setSaving(false);
     }
   };
 
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal-dialog" role="dialog" aria-modal="true">
+      <div className="modal">
         <div className="modal-header">
-          <h2 className="modal-title">
-            {editingAppointment ? 'Edit Appointment' : 'Add New Appointment'}
-          </h2>
-          <button
-            id="btn-close-modal"
-            type="button"
-            className="modal-close-btn"
-            onClick={onClose}
-            aria-label="Close dialog"
-          >
-            <XIcon size={20} />
-          </button>
+          <h2>{editingAppointment ? 'Edit Appointment' : 'New Appointment'}</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
         </div>
 
+        {error && <div className="error-box">⚠️ {error}</div>}
+
         <form onSubmit={handleSubmit}>
-          <div className="modal-body">
-            {(clientError || serverError) && (
-              <div id="modal-conflict-alert" className="conflict-alert-box">
-                <AlertIcon size={18} />
-                <div>
-                  <strong>{serverError ? 'Scheduling Conflict / Server Error:' : 'Validation Warning:'}</strong>
-                  <p>{serverError || clientError}</p>
-                </div>
-              </div>
-            )}
+          <label>
+            Title *
+            <input name="title" value={form.title} onChange={handleChange} required maxLength={150} placeholder="e.g. Sprint Planning" />
+          </label>
 
-            <div className="form-group">
-              <label htmlFor="input-title" className="form-label">
-                Appointment Title *
-              </label>
-              <input
-                id="input-title"
-                name="title"
-                type="text"
-                className="form-input"
-                placeholder="e.g. Q3 Roadmap Review with Product Team"
-                value={formData.title}
-                onChange={handleChange}
-                required
-                maxLength={150}
-              />
-            </div>
-
-            <div className="form-row-2">
-              <div className="form-group">
-                <label htmlFor="input-attendee" className="form-label">
-                  Attendee / Client Name *
-                </label>
-                <input
-                  id="input-attendee"
-                  name="attendee"
-                  type="text"
-                  className="form-input"
-                  placeholder="e.g. Elena Rostova or Acme Corp"
-                  value={formData.attendee}
-                  onChange={handleChange}
-                  required
-                  maxLength={100}
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="input-category" className="form-label">
-                  Category
-                </label>
-                <select
-                  id="input-category"
-                  name="category"
-                  className="form-select"
-                  value={formData.category}
-                  onChange={handleChange}
-                >
-                  {CATEGORIES.map((cat) => (
-                    <option key={cat} value={cat}>{cat}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="input-date" className="form-label">
-                Date *
-              </label>
-              <input
-                id="input-date"
-                name="date"
-                type="date"
-                className="form-input"
-                value={formData.date}
-                onChange={handleChange}
-                required
-              />
-            </div>
-
-            <div className="form-row-2">
-              <div className="form-group">
-                <label htmlFor="input-start-time" className="form-label">
-                  Start Time *
-                </label>
-                <input
-                  id="input-start-time"
-                  name="start_time"
-                  type="time"
-                  className="form-input"
-                  value={formData.start_time}
-                  onChange={handleChange}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="input-end-time" className="form-label">
-                  End Time *
-                </label>
-                <input
-                  id="input-end-time"
-                  name="end_time"
-                  type="time"
-                  className="form-input"
-                  value={formData.end_time}
-                  onChange={handleChange}
-                  required
-                />
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="input-description" className="form-label">
-                Description / Agenda
-              </label>
-              <textarea
-                id="input-description"
-                name="description"
-                className="form-textarea"
-                placeholder="Key meeting objectives, discussion items, links..."
-                value={formData.description}
-                onChange={handleChange}
-                rows={3}
-                maxLength={1000}
-              />
-            </div>
+          <div className="form-row">
+            <label>
+              Attendee *
+              <input name="attendee" value={form.attendee} onChange={handleChange} required maxLength={100} placeholder="e.g. Engineering Team" />
+            </label>
+            <label>
+              Category
+              <select name="category" value={form.category} onChange={handleChange}>
+                {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+              </select>
+            </label>
           </div>
 
-          <div className="modal-footer">
-            <button
-              id="btn-cancel-modal"
-              type="button"
-              className="btn btn-secondary"
-              onClick={onClose}
-              disabled={isSubmitting}
-            >
-              Cancel
-            </button>
-            <button
-              id="btn-save-appointment"
-              type="submit"
-              className="btn btn-primary"
-              disabled={isSubmitting || Boolean(clientError)}
-            >
-              {isSubmitting ? 'Saving...' : editingAppointment ? 'Update Appointment' : 'Create Appointment'}
+          <label>
+            Date *
+            <input type="date" name="date" value={form.date} onChange={handleChange} required />
+          </label>
+
+          <div className="form-row">
+            <label>
+              Start Time *
+              <input type="time" name="start_time" value={form.start_time} onChange={handleChange} required />
+            </label>
+            <label>
+              End Time *
+              <input type="time" name="end_time" value={form.end_time} onChange={handleChange} required />
+            </label>
+          </div>
+
+          <label>
+            Description
+            <textarea name="description" value={form.description} onChange={handleChange} rows={3} placeholder="Optional notes or agenda..." />
+          </label>
+
+          <div className="modal-actions">
+            <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={saving}>
+              {saving ? 'Saving...' : editingAppointment ? 'Update' : 'Create'}
             </button>
           </div>
         </form>

@@ -1,190 +1,198 @@
-import os
-from pathlib import Path
-from typing import Optional, List
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from typing import Optional, List
+from pathlib import Path
 
-from backend.database import init_db, reset_database
-from backend.models import (
-    AppointmentCreate,
-    AppointmentUpdate,
-    AppointmentStatusUpdate,
-    AppointmentResponse,
-    ConflictCheckResult
-)
-from backend.repository import AppointmentRepository
+from backend.database import init_db, get_db, reset_db
 
-# Initialize database tables and seed data
+# initialize database on startup
 init_db()
 
-app = FastAPI(
-    title="Appointment Board API",
-    description="Full-stack appointment management board API with time-slot conflict detection and SQL storage.",
-    version="1.0.0"
-)
+app = FastAPI(title="Appointment Board API")
 
-# CORS configuration for development
+# allow frontend to talk to backend during development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+# --- Pydantic models for request validation ---
+
+class AppointmentIn(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    attendee: str
+    category: Optional[str] = "General"
+    date: str          # YYYY-MM-DD
+    start_time: str    # HH:MM
+    end_time: str      # HH:MM
+    status: Optional[str] = "scheduled"
+
+class StatusUpdate(BaseModel):
+    status: str        # scheduled, completed, or cancelled
+
+
+# --- Helper: check if a time slot is already taken ---
+
+def has_conflict(date, start, end, exclude_id=None):
+    """
+    Check if any active (non-cancelled) appointment overlaps with
+    the given time range. Returns True if there's a conflict.
+    """
+    conn = get_db()
+    query = """
+        SELECT id FROM appointments
+        WHERE date = ? AND status != 'cancelled'
+        AND start_time < ? AND end_time > ?
+    """
+    params = [date, end, start]
+
+    if exclude_id:
+        query += " AND id != ?"
+        params.append(exclude_id)
+
+    row = conn.execute(query, params).fetchone()
+    conn.close()
+    return row is not None
+
+
+# --- API Routes ---
+
 @app.get("/api/health")
-def health_check():
-    return {"status": "ok", "service": "Appointment Board API"}
+def health():
+    return {"status": "ok"}
 
-@app.get("/api/appointments", response_model=List[AppointmentResponse])
-def get_appointments(
-    date: Optional[str] = Query(None, description="Filter by date (YYYY-MM-DD)"),
-    status: Optional[str] = Query(None, description="Filter by status (scheduled, completed, cancelled)"),
-    search: Optional[str] = Query(None, description="Keyword search in title, description, or attendee")
+
+@app.get("/api/appointments")
+def list_appointments(
+    date: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None
 ):
-    """Retrieve all appointments matching optional filters."""
-    return AppointmentRepository.get_all(date_filter=date, status_filter=status, search_query=search)
+    """Get all appointments, optionally filtered by date/status/keyword."""
+    conn = get_db()
+    conditions = []
+    params = []
 
-@app.get("/api/appointments/check-availability", response_model=ConflictCheckResult)
-def check_time_slot_availability(
-    date: str = Query(..., description="Target appointment date (YYYY-MM-DD)"),
-    start_time: str = Query(..., description="Start time (HH:MM)"),
-    end_time: str = Query(..., description="End time (HH:MM)"),
-    exclude_id: Optional[int] = Query(None, description="ID of appointment to exclude (for edits)")
-):
-    """Proactively verify if a time slot is available without saving."""
-    if end_time <= start_time:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"End time ({end_time}) must be strictly after start time ({start_time})."
-        )
-    return AppointmentRepository.check_conflict(
-        date=date,
-        start_time=start_time,
-        end_time=end_time,
-        exclude_id=exclude_id
+    if date:
+        conditions.append("date = ?")
+        params.append(date)
+    if status and status != "all":
+        conditions.append("status = ?")
+        params.append(status)
+    if search:
+        conditions.append("(LOWER(title) LIKE ? OR LOWER(attendee) LIKE ?)")
+        params.extend([f"%{search.lower()}%", f"%{search.lower()}%"])
+
+    where = ""
+    if conditions:
+        where = "WHERE " + " AND ".join(conditions)
+
+    rows = conn.execute(
+        f"SELECT * FROM appointments {where} ORDER BY date, start_time",
+        params
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/appointments/{appt_id}")
+def get_appointment(appt_id: int):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM appointments WHERE id = ?", (appt_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Appointment not found")
+    return dict(row)
+
+
+@app.post("/api/appointments", status_code=201)
+def create_appointment(data: AppointmentIn):
+    # validate time range
+    if data.end_time <= data.start_time:
+        raise HTTPException(400, "End time must be after start time")
+
+    # check for overlapping appointments
+    if has_conflict(data.date, data.start_time, data.end_time):
+        raise HTTPException(409, "Time slot conflict with an existing appointment")
+
+    conn = get_db()
+    cursor = conn.execute("""
+        INSERT INTO appointments (title, description, attendee, category, date, start_time, end_time, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled')
+    """, (data.title, data.description, data.attendee, data.category, data.date, data.start_time, data.end_time))
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return get_appointment(new_id)
+
+
+@app.put("/api/appointments/{appt_id}")
+def update_appointment(appt_id: int, data: AppointmentIn):
+    # make sure it exists
+    existing = get_appointment(appt_id)
+
+    if data.end_time <= data.start_time:
+        raise HTTPException(400, "End time must be after start time")
+
+    # exclude self when checking for conflicts
+    if has_conflict(data.date, data.start_time, data.end_time, exclude_id=appt_id):
+        raise HTTPException(409, "Time slot conflict with an existing appointment")
+
+    conn = get_db()
+    status = data.status if data.status else existing["status"]
+    conn.execute("""
+        UPDATE appointments
+        SET title=?, description=?, attendee=?, category=?, date=?,
+            start_time=?, end_time=?, status=?, updated_at=CURRENT_TIMESTAMP
+        WHERE id=?
+    """, (data.title, data.description, data.attendee, data.category, data.date,
+          data.start_time, data.end_time, status, appt_id))
+    conn.commit()
+    conn.close()
+    return get_appointment(appt_id)
+
+
+@app.patch("/api/appointments/{appt_id}/status")
+def change_status(appt_id: int, body: StatusUpdate):
+    existing = get_appointment(appt_id)
+
+    # if reactivating a cancelled appointment, check the slot is still free
+    if existing["status"] == "cancelled" and body.status == "scheduled":
+        if has_conflict(existing["date"], existing["start_time"], existing["end_time"], exclude_id=appt_id):
+            raise HTTPException(409, "Can't reactivate - time slot is now taken")
+
+    conn = get_db()
+    conn.execute(
+        "UPDATE appointments SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        (body.status, appt_id)
     )
+    conn.commit()
+    conn.close()
+    return get_appointment(appt_id)
 
-@app.get("/api/appointments/{appointment_id}", response_model=AppointmentResponse)
-def get_appointment_by_id(appointment_id: int):
-    """Retrieve a single appointment by its unique identifier."""
-    appointment = AppointmentRepository.get_by_id(appointment_id)
-    if not appointment:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Appointment with ID {appointment_id} not found."
-        )
-    return appointment
-
-@app.post("/api/appointments", response_model=AppointmentResponse, status_code=status.HTTP_201_CREATED)
-def create_appointment(payload: AppointmentCreate):
-    """
-    Create a new appointment.
-    Performs slot conflict check against active appointments on the given date.
-    """
-    # Overlap conflict check
-    conflict = AppointmentRepository.check_conflict(
-        date=payload.date,
-        start_time=payload.start_time,
-        end_time=payload.end_time
-    )
-
-    if conflict.has_conflict:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=conflict.message
-        )
-
-    new_appointment = AppointmentRepository.create(payload)
-    return new_appointment
-
-@app.put("/api/appointments/{appointment_id}", response_model=AppointmentResponse)
-def update_appointment(appointment_id: int, payload: AppointmentUpdate):
-    """
-    Update an existing appointment.
-    Validates that the new time slot does not collide with other active appointments.
-    """
-    existing = AppointmentRepository.get_by_id(appointment_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Appointment with ID {appointment_id} not found."
-        )
-
-    # Check for conflict, excluding the appointment being edited
-    conflict = AppointmentRepository.check_conflict(
-        date=payload.date,
-        start_time=payload.start_time,
-        end_time=payload.end_time,
-        exclude_id=appointment_id
-    )
-
-    if conflict.has_conflict:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=conflict.message
-        )
-
-    updated = AppointmentRepository.update(appointment_id, payload)
-    return updated
-
-@app.patch("/api/appointments/{appointment_id}/status", response_model=AppointmentResponse)
-def update_appointment_status(appointment_id: int, payload: AppointmentStatusUpdate):
-    """
-    Update status of an appointment (e.g. mark as completed or cancelled).
-    Note: Cancelling frees the time slot for future bookings.
-    """
-    existing = AppointmentRepository.get_by_id(appointment_id)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Appointment with ID {appointment_id} not found."
-        )
-
-    # If transitioning from cancelled back to scheduled, re-verify slot availability
-    if existing["status"] == "cancelled" and payload.status == "scheduled":
-        conflict = AppointmentRepository.check_conflict(
-            date=existing["date"],
-            start_time=existing["start_time"],
-            end_time=existing["end_time"],
-            exclude_id=appointment_id
-        )
-        if conflict.has_conflict:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Cannot uncancel: {conflict.message}"
-            )
-
-    updated = AppointmentRepository.update_status(appointment_id, payload.status)
-    return updated
-
-@app.delete("/api/appointments/{appointment_id}")
-def delete_appointment(appointment_id: int):
-    """Delete an appointment permanently."""
-    success = AppointmentRepository.delete(appointment_id)
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Appointment with ID {appointment_id} not found."
-        )
-    return {"message": f"Appointment {appointment_id} successfully deleted."}
 
 @app.post("/api/appointments/reset-seed")
-def reset_sample_appointments():
-    """Reset database to initial pristine sample appointments."""
-    reset_database()
-    return {"message": "Database reset to initial sample appointments."}
+def reset_samples():
+    reset_db()
+    return {"message": "Database reset with sample appointments"}
 
-# Serve built frontend if dist directory exists
-FRONTEND_DIST = Path(__file__).resolve().parent.parent / "dist"
-if FRONTEND_DIST.exists():
-    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        file_path = FRONTEND_DIST / full_path
-        if file_path.is_file():
-            return FileResponse(file_path)
-        return FileResponse(FRONTEND_DIST / "index.html")
+# --- Serve the built React frontend ---
+
+DIST = Path(__file__).resolve().parent.parent / "dist"
+if DIST.exists():
+    app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+
+    @app.get("/{path:path}")
+    def serve_frontend(path: str):
+        file = DIST / path
+        if file.is_file():
+            return FileResponse(file)
+        return FileResponse(DIST / "index.html")
