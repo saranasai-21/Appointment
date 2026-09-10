@@ -1,6 +1,9 @@
-.git
 __pycache__
 *.pyc
-.venv
-test_appointments.db
-frontend/node_modules
+*.db
+node_modules
+.git
+start.bat
+run_app.py
+test_e2e_live.py
+backend/test_appointments.py
