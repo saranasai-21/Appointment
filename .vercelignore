@@ -1,0 +1,6 @@
+.git
+__pycache__
+*.pyc
+.venv
+test_appointments.db
+frontend/node_modules
