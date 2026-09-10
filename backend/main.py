@@ -178,7 +178,7 @@ def reset_sample_appointments():
     return {"message": "Database reset to initial sample appointments."}
 
 # Serve built frontend if dist directory exists
-FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "dist"
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
